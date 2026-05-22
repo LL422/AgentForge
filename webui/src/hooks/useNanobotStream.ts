@@ -11,6 +11,7 @@ import {
 import type { StreamError } from "@/lib/nanobot-client";
 import type {
   InboundEvent,
+  OrchestrationPlan,
   OutboundCliAppMention,
   OutboundImageGeneration,
   OutboundMedia,
@@ -327,6 +328,12 @@ export function useNanobotStream(
   /** Clear the current ``streamError`` (e.g. after the user dismisses the
    * notification or starts a fresh action). */
   dismissStreamError: () => void;
+  /** Orchestration plan, phase, and completion summary (orchestration.* WS events). */
+  orchestrationState: {
+    plan: OrchestrationPlan | null;
+    phase: "plan" | "executing" | "complete";
+    summary: string;
+  };
 } {
   const { client } = useClient();
   const [messages, setMessages] = useState<UIMessage[]>(initialMessages);
@@ -341,6 +348,12 @@ export function useNanobotStream(
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [goalState, setGoalState] = useState<GoalStateWsPayload | undefined>(undefined);
   const [streamError, setStreamError] = useState<StreamError | null>(null);
+  // Orchestration state
+  const [orchestrationState, setOrchestrationState] = useState<{
+    plan: OrchestrationPlan | null;
+    phase: "plan" | "executing" | "complete";
+    summary: string;
+  }>({ plan: null, phase: "plan", summary: "" });
   const buffer = useRef<StreamBuffer | null>(null);
   const activeAssistantRef = useRef<ActiveAssistantCursor | null>(null);
   const closedAssistantStreamIdsRef = useRef<Set<string>>(new Set());
@@ -543,6 +556,13 @@ export function useNanobotStream(
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chatId, client, clearActivitySegment, clearPendingStreamWork]);
+
+  useEffect(() => {
+    setOrchestrationState((prev) => {
+      if (prev.plan === null && prev.phase === "plan" && prev.summary === "") return prev;
+      return { plan: null, phase: "plan", summary: "" };
+    });
+  }, [chatId]);
 
   useEffect(() => {
     if (hasPendingToolCalls) setIsStreaming(true);
@@ -795,6 +815,69 @@ export function useNanobotStream(
         });
         return;
       }
+      // Orchestration events
+      if (ev.event === "orchestration.plan_ready") {
+        setOrchestrationState({ plan: ev.plan, phase: "executing", summary: "" });
+        return;
+      }
+      if (ev.event === "orchestration.task_start") {
+        setOrchestrationState((prev) => {
+          if (!prev.plan) return prev;
+          return {
+            ...prev,
+            phase: "executing",
+            plan: {
+              ...prev.plan,
+              tasks: prev.plan.tasks.map((t) =>
+                t.id === ev.task_id ? { ...t, status: "running" as const } : t,
+              ),
+            },
+          };
+        });
+        return;
+      }
+      if (ev.event === "orchestration.task_done") {
+        setOrchestrationState((prev) => {
+          if (!prev.plan) return prev;
+          return {
+            ...prev,
+            plan: {
+              ...prev.plan,
+              tasks: prev.plan.tasks.map((t) =>
+                t.id === ev.task_id
+                  ? { ...t, status: "completed" as const, result: ev.result_preview }
+                  : t,
+              ),
+            },
+          };
+        });
+        return;
+      }
+      if (ev.event === "orchestration.task_failed") {
+        setOrchestrationState((prev) => {
+          if (!prev.plan) return prev;
+          return {
+            ...prev,
+            plan: {
+              ...prev.plan,
+              tasks: prev.plan.tasks.map((t) =>
+                t.id === ev.task_id
+                  ? { ...t, status: "failed" as const, error: ev.error }
+                  : t,
+              ),
+            },
+          };
+        });
+        return;
+      }
+      if (ev.event === "orchestration.complete") {
+        setOrchestrationState((prev) => ({
+          ...prev,
+          phase: "complete",
+          summary: ev.summary,
+        }));
+        return;
+      }
       // ``attached`` / ``error`` frames aren't actionable here; the client
       // shell handles them separately.
     };
@@ -889,5 +972,6 @@ export function useNanobotStream(
     setMessages,
     streamError,
     dismissStreamError,
+    orchestrationState,
   };
 }

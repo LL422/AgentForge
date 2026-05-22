@@ -2,13 +2,19 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ArrowDown } from "lucide-react";
 
 import { MessageBubble } from "@/components/MessageBubble";
+import { OrchestrationCard } from "@/components/orchestration/OrchestrationCard";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { UIMessage } from "@/lib/types";
+import type { OrchestrationPlan, UIMessage } from "@/lib/types";
 
 interface MessageListProps {
   messages: UIMessage[];
   isStreaming: boolean;
+  orchestrationState?: {
+    plan: OrchestrationPlan | null;
+    phase: "plan" | "executing" | "complete";
+    summary: string;
+  };
 }
 
 const NEAR_BOTTOM_PX = 48;
@@ -19,7 +25,7 @@ const NEAR_BOTTOM_PX = 48;
  * position when they've scrolled up to read earlier turns. A floating
  * "scroll to bottom" button appears whenever we're detached from the bottom.
  */
-export function MessageList({ messages, isStreaming }: MessageListProps) {
+export function MessageList({ messages, isStreaming, orchestrationState }: MessageListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [atBottom, setAtBottom] = useState(true);
 
@@ -72,6 +78,14 @@ export function MessageList({ messages, isStreaming }: MessageListProps) {
         )}
       >
         <div className="mx-auto flex w-full max-w-[64rem] flex-col gap-6 px-4 pt-4 pb-8">
+          {orchestrationState?.plan && (
+            <OrchestrationCard
+              plan={orchestrationState.plan}
+              phase={orchestrationState.phase}
+              summary={orchestrationState.summary}
+              isStreaming={isStreaming}
+            />
+          )}
           {messages.map((m) => (
             <MessageBubble key={m.id} message={m} />
           ))}
