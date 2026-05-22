@@ -13,11 +13,12 @@ from typing import Any
 from loguru import logger
 
 from nanobot.agent.tools.base import Tool, tool_parameters
-from nanobot.agent.tools.context import ToolContext
+from nanobot.agent.tools.context import ContextAware, RequestContext, ToolContext
 from nanobot.agent.tools.file_state import FileStates
 from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.runner import AgentRunner
+from nanobot.bus.events import OUTBOUND_META_AGENT_UI, OutboundMessage
 from nanobot.orchestration.plan import TaskNode, TaskPlan, TaskStatus
 from nanobot.orchestration.planner import TaskPlanner
 from nanobot.orchestration.worker import run_worker
@@ -59,6 +60,41 @@ class OrchestrationTool(Tool):
         self._model: str = ""
         self._workspace: Path | None = None
         self._ctx: ToolContext | None = None
+        self._request_ctx: RequestContext | None = None
+
+    def set_context(self, ctx: RequestContext) -> None:
+        """Store the per-request origin so events can be routed to the correct WebSocket chat."""
+        self._request_ctx = ctx
+
+    async def _emit_event(self, phase: str, data: dict[str, Any] | None = None) -> None:
+        """Publish an orchestration progress event to the WebSocket channel via the bus.
+
+        Events are tagged with ``chat_id`` so the frontend can route them to the
+        correct chat panel.  The ``_progress`` marker causes the WebSocket channel
+        to treat this as a transient breadcrumb rather than a conversation message.
+        """
+        if self._ctx is None or self._ctx.bus is None:
+            return
+        if self._request_ctx is None:
+            return
+        payload: dict[str, Any] = {
+            "kind": "orchestration",
+            "phase": phase,
+        }
+        if data is not None:
+            payload["data"] = data
+        meta: dict[str, Any] = {
+            "_progress": True,
+            OUTBOUND_META_AGENT_UI: payload,
+        }
+        await self._ctx.bus.publish_outbound(
+            OutboundMessage(
+                channel=self._request_ctx.channel,
+                chat_id=self._request_ctx.chat_id,
+                content="",
+                metadata=meta,
+            )
+        )
 
     @classmethod
     def create(cls, ctx: ToolContext) -> OrchestrationTool:
@@ -91,6 +127,11 @@ class OrchestrationTool(Tool):
         # Phase 1: Plan
         planner = TaskPlanner(self._provider, self._model)
         plan = await planner.plan(goal, context_hint)
+        await self._emit_event("plan_ready", {
+            "goal": plan.goal,
+            "task_count": len(plan.tasks),
+            "tasks": [{"id": t.id, "title": t.title, "role": t.role} for t in plan.tasks],
+        })
 
         # Phase 2: Execute
         previous_results: dict[str, str] = {}
@@ -108,6 +149,11 @@ class OrchestrationTool(Tool):
 
             async def _run_one(task: TaskNode) -> None:
                 task.status = TaskStatus.RUNNING
+                await self._emit_event("task_start", {
+                    "task_id": task.id,
+                    "title": task.title,
+                    "role": task.role,
+                })
                 result = await run_worker(
                     runner=runner,
                     task=task,
@@ -132,17 +178,33 @@ class OrchestrationTool(Tool):
                     if result2.error:
                         task.status = TaskStatus.FAILED
                         task.error = result2.error
+                        await self._emit_event("task_failed", {
+                            "task_id": task.id,
+                            "title": task.title,
+                            "error": result2.error,
+                        })
                         return
                     result = result2
 
                 task.status = TaskStatus.COMPLETED
                 task.result = result.content
                 previous_results[task.id] = result.content
+                await self._emit_event("task_done", {
+                    "task_id": task.id,
+                    "title": task.title,
+                })
 
             await asyncio.gather(*[_run_one(t) for t in ready])
 
         # Phase 3: Merge
-        return self._merge_results(plan)
+        merged = self._merge_results(plan)
+        await self._emit_event("complete", {
+            "goal": plan.goal,
+            "completed": plan.completed_count(),
+            "failed": plan.failed_count(),
+            "total": len(plan.tasks),
+        })
+        return merged
 
     def _merge_results(self, plan: TaskPlan) -> str:
         completed = [t for t in plan.tasks if t.status == TaskStatus.COMPLETED]
