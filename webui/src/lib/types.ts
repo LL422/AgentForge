@@ -344,6 +344,24 @@ export type ConnectionStatus =
   | "closed"
   | "error";
 
+/** Orchestration plan node from the backend. */
+export interface OrchestrationTaskNode {
+  id: string;
+  title: string;
+  description: string;
+  role: "analyst" | "developer" | "reviewer" | "tester";
+  status: "pending" | "ready" | "running" | "completed" | "failed";
+  dependencies: string[];
+  result?: string | null;
+  error?: string | null;
+}
+
+/** Orchestration plan payload. */
+export interface OrchestrationPlan {
+  goal: string;
+  tasks: OrchestrationTaskNode[];
+}
+
 export type InboundEvent =
   | { event: "ready"; chat_id: string; client_id: string }
   | { event: "attached"; chat_id: string }
@@ -416,7 +434,39 @@ export type InboundEvent =
       goal_state: GoalStateWsPayload;
     }
   | { event: "session_updated"; chat_id: string; scope?: "metadata" | "thread" | string }
-  | { event: "error"; chat_id?: string; detail?: string };
+  | { event: "error"; chat_id?: string; detail?: string }
+  | {
+      event: "orchestration.plan_ready";
+      chat_id: string;
+      plan: OrchestrationPlan;
+    }
+  | {
+      event: "orchestration.task_start";
+      chat_id: string;
+      task_id: string;
+      role: string;
+      title: string;
+    }
+  | {
+      event: "orchestration.task_done";
+      chat_id: string;
+      task_id: string;
+      result_preview: string;
+      duration_s: number;
+    }
+  | {
+      event: "orchestration.task_failed";
+      chat_id: string;
+      task_id: string;
+      error: string;
+    }
+  | {
+      event: "orchestration.complete";
+      chat_id: string;
+      summary: string;
+      completed: number;
+      failed: number;
+    };
 
 /** Base64-encoded image attached to an outbound ``message`` envelope.
  *
